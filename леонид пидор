@@ -1,82 +1,84 @@
-import os
-import pandas as pd
-import numpy as np
+import os  # Импорт модуля для работы с файловой системой
+import pandas as pd  # Импорт библиотеки pandas для работы с таблицами данных (DataFrame)
+import numpy as np  # Импорт библиотеки numpy для работы с массивами и числовыми вычислениями
 
 def remove_empty_rows(df):
     """
     Удаляет пустые строки из DataFrame.
     """
-    initial_rows = len(df)
-    df.dropna(how='all', inplace=True)
-    removed_rows = initial_rows - len(df)
-    return df, removed_rows
+    initial_rows = len(df)  # Сохраняем количество строк до удаления пустых
+    df.dropna(how='all', inplace=True)  # Удаляем строки, в которых все значения - NaN
+    removed_rows = initial_rows - len(df)  # Вычисляем количество удаленных строк
+    return df, removed_rows  # Возвращаем DataFrame и количество удаленных строк
 
 def remove_duplicates(df):
     """
     Удаляет дубликаты строк из DataFrame.
     """
-    initial_rows = len(df)
-    df.drop_duplicates(inplace=True)
-    removed_rows = initial_rows - len(df)
-    return df, removed_rows
+    initial_rows = len(df)  # Сохраняем количество строк до удаления дубликатов
+    df.drop_duplicates(inplace=True)  # Удаляем дубликаты строк
+    removed_rows = initial_rows - len(df)  # Вычисляем количество удаленных строк
+    return df, removed_rows  # Возвращаем DataFrame и количество удаленных строк
 
 def remove_low_prices(df, column_name="lot_price", lower_bound=0, upper_bound=100):
     """
     Удаляет строки, где значение в указанном столбце находится в диапазоне [lower_bound, upper_bound].
     """
-    if column_name not in df.columns:
-        print(f"Предупреждение: столбец {column_name} отсутствует. Пропуск.")
-        return df, 0
+    if column_name not in df.columns:  # Проверяем, существует ли столбец в DataFrame
+        print(f"Предупреждение: столбец {column_name} отсутствует. Пропуск.")  # Выводим предупреждение
+        return df, 0  # Возвращаем исходный DataFrame и 0 удаленных строк
     
-    if not np.issubdtype(df[column_name].dtype, np.number):
-        print(f"Предупреждение: столбец {column_name} должен быть числовым. Пропуск.")
-        return df, 0
+    if not np.issubdtype(df[column_name].dtype, np.number):  # Проверяем, является ли столбец числовым
+        print(f"Предупреждение: столбец {column_name} должен быть числовым. Пропуск.")  # Выводим предупреждение
+        return df, 0  # Возвращаем исходный DataFrame и 0 удаленных строк
     
-    initial_rows = len(df)
-    # Удаляем строки, где значения находятся в диапазоне [lower_bound, upper_bound]
+    initial_rows = len(df)  # Сохраняем количество строк до удаления
+    # Удаляем строки, где значения находятся в заданном диапазоне
     df = df[(df[column_name] < lower_bound) | (df[column_name] > upper_bound)]
-    removed_rows = initial_rows - len(df)
-    return df, removed_rows
+    removed_rows = initial_rows - len(df)  # Вычисляем количество удаленных строк
+    return df, removed_rows  # Возвращаем DataFrame и количество удаленных строк
 
 def remove_outliers(df, column_name):
     """
     Удаляет выбросы по указанному числовому столбцу и возвращает их.
     """
-    if column_name not in df.columns:
-        print(f"Предупреждение: столбец {column_name} отсутствует. Пропуск.")
-        return df, pd.DataFrame(), 0
+    if column_name not in df.columns:  # Проверяем, существует ли столбец в DataFrame
+        print(f"Предупреждение: столбец {column_name} отсутствует. Пропуск.")  # Выводим предупреждение
+        return df, pd.DataFrame(), 0  # Возвращаем исходный DataFrame, пустой DataFrame и 0 удаленных строк
     
-    if not np.issubdtype(df[column_name].dtype, np.number):
-        print(f"Предупреждение: столбец {column_name} должен быть числовым. Пропуск.")
-        return df, pd.DataFrame(), 0
+    if not np.issubdtype(df[column_name].dtype, np.number):  # Проверяем, является ли столбец числовым
+        print(f"Предупреждение: столбец {column_name} должен быть числовым. Пропуск.")  # Выводим предупреждение
+        return df, pd.DataFrame(), 0  # Возвращаем исходный DataFrame, пустой DataFrame и 0 удаленных строк
     
-    initial_rows = len(df)
-    mean = df[column_name].mean()
-    std = df[column_name].std()
-    lower_bound = mean - 3 * std
-    upper_bound = mean + 3 * std
+    initial_rows = len(df)  # Сохраняем количество строк до удаления выбросов
+    mean = df[column_name].mean()  # Вычисляем среднее значение столбца
+    std = df[column_name].std()  # Вычисляем стандартное отклонение столбца
+    lower_bound = mean - 3 * std  # Устанавливаем нижнюю границу выбросов (3 стандартных отклонения ниже среднего)
+    upper_bound = mean + 3 * std  # Устанавливаем верхнюю границу выбросов (3 стандартных отклонения выше среднего)
+    
     # Выделяем выбросы
     outliers = df[(df[column_name] < lower_bound) | (df[column_name] > upper_bound)]
-    # Оставляем строки без выбросов
+    # Оставляем только те строки, которые не являются выбросами
     df = df[(df[column_name] >= lower_bound) & (df[column_name] <= upper_bound)]
-    removed_rows = initial_rows - len(df)
-    return df, outliers, removed_rows
+    
+    removed_rows = initial_rows - len(df)  # Вычисляем количество удаленных строк
+    return df, outliers, removed_rows  # Возвращаем очищенный DataFrame, выбросы и количество удаленных строк
 
 def process_files(file_paths, output_dir, outliers_dir):
     """
     Обрабатывает файлы CSV, удаляя пустые строки, дубликаты, строки с lot_price в диапазоне [0, 100] и выбросы.
     """
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    if not os.path.exists(outliers_dir):
-        os.makedirs(outliers_dir)
+    if not os.path.exists(output_dir):  # Проверяем, существует ли выходная папка
+        os.makedirs(output_dir)  # Создаем папку, если она отсутствует
+    if not os.path.exists(outliers_dir):  # Проверяем, существует ли папка для выбросов
+        os.makedirs(outliers_dir)  # Создаем папку, если она отсутствует
     
+    # Словарь для хранения общего количества удаленных строк по категориям
     total_removed = {"empty_rows": 0, "duplicates": 0, "low_prices": 0, "outliers": 0}
     
-    for file_path in file_paths:
-        print(f"Обработка файла: {file_path}")
-        # Чтение файла
-        df = pd.read_csv(file_path)
+    for file_path in file_paths:  # Цикл по списку файлов
+        print(f"Обработка файла: {file_path}")  # Выводим сообщение о начале обработки файла
+        df = pd.read_csv(file_path)  # Загружаем CSV-файл в DataFrame
         
         # Удаление пустых строк
         df, removed_empty = remove_empty_rows(df)
@@ -98,14 +100,15 @@ def process_files(file_paths, output_dir, outliers_dir):
             # Сохраняем выбросы в отдельный файл
             outliers_file = os.path.join(outliers_dir, f"outliers_{os.path.basename(file_path)}")
             if not outliers.empty:
-                outliers.to_csv(outliers_file, index=False)
+                outliers.to_csv(outliers_file, index=False)  # Сохраняем выбросы в CSV-файл
                 print(f"Выбросы сохранены: {outliers_file}")
         
         # Сохранение обработанного файла
         output_file = os.path.join(output_dir, os.path.basename(file_path))
-        df.to_csv(output_file, index=False)
-        print(f"Файл сохранен: {output_file}")
+        df.to_csv(output_file, index=False)  # Сохраняем очищенный DataFrame в CSV-файл
+        print(f"Файл сохранен: {output_file}")  # Выводим сообщение о сохранении файла
     
+    # Вывод итоговой информации о количестве удаленных данных
     print("\nИтоги обработки:")
     print(f"Удалено пустых строк: {total_removed['empty_rows']}")
     print(f"Удалено дубликатов: {total_removed['duplicates']}")
@@ -114,11 +117,11 @@ def process_files(file_paths, output_dir, outliers_dir):
 
 # Пример использования
 if __name__ == "__main__":
-    input_files = [
+    input_files = [  # Список файлов для обработки
         "ml_model_participants_post_num.csv",
         "ml_model_training_data_2024_10_15_202412042031.csv",
         "ml_model_training_data_items_2024_10_15_202412042038.csv"
     ]
-    output_directory = "cleaned_files"
-    outliers_directory = "outliers_files"
-    process_files(input_files, output_directory, outliers_directory)
+    output_directory = "cleaned_files"  # Папка для сохранения обработанных файлов
+    outliers_directory = "outliers_files"  # Папка для сохранения выбросов
+    process_files(input_files, output_directory, outliers_directory)  # Запуск обработки файлов
