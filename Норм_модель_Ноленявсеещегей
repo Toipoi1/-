@@ -1,0 +1,70 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+from scipy.sparse import hstack
+
+# Загрузка данных
+data1 = pd.read_csv('small_2.csv')  # pn_lot, post_num, is_winner, fz
+data2 = pd.read_csv('medium.csv')   # fz, pn_lot, item_name, okpd2_code, ktru_code, drug_purchase_object
+data3 = pd.read_csv('high.csv')     # fz, pn_lot, region_code, min_publish_date, purchase_name, lot_name, forsmallbiz, lot_price, customer_inn_kpp_md5, okpd2_code
+
+# Объединение данных
+data = pd.merge(data1, data2, on=['fz', 'pn_lot'], how='inner')  # Объединяем data1 и data2
+data = pd.merge(data, data3, on=['fz', 'pn_lot'], how='inner')   # Объединяем с data3
+
+# Проверка данных после объединения
+print(data.head())
+print(data.info())
+
+# Предобработка данных
+data = data.dropna(subset=['is_winner'])  # Удаляем строки, где отсутствует целевая переменная
+
+# Преобразование даты в числовой формат
+data['min_publish_date'] = pd.to_datetime(data['min_publish_date'])  # Преобразуем в datetime
+data['days_since_min_date'] = (data['min_publish_date'] - data['min_publish_date'].min()).dt.days  # Количество дней с минимальной даты
+
+# Выбор признаков
+X = data[['post_num', 'fz', 'item_name', 'okpd2_code', 'ktru_code', 'region_code', 'days_since_min_date', 'purchase_name', 'forsmallbiz', 'lot_price', 'customer_inn_kpp_md5']]
+y = data['is_winner']
+
+# Кодирование категориальных данных
+encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=True)  # Используем разреженную матрицу
+X_categorical = encoder.fit_transform(X[['fz', 'item_name', 'okpd2_code', 'ktru_code', 'region_code', 'purchase_name']])
+
+# Нормализация числовых данных
+scaler = StandardScaler()
+X_numerical = scaler.fit_transform(X[['post_num', 'days_since_min_date', 'lot_price', 'customer_inn_kpp_md5']])
+
+# Объединение признаков
+X_processed = hstack([X_categorical, X_numerical])  # Используем scipy.sparse.hstack для разреженных матриц
+
+# Разделение данных на обучающую и тестовую выборки
+X_train, X_test, y_train, y_test = train_test_split(X_processed, y, test_size=0.2, random_state=42)
+
+# Преобразование разреженных матриц в плотные для TensorFlow
+X_train = X_train.toarray()
+X_test = X_test.toarray()
+
+# Построение модели
+model = Sequential()
+model.add(Dense(128, input_dim=X_processed.shape[1], activation='relu'))
+model.add(Dropout(0.5))
+model.add(Dense(64, activation='relu'))
+model.add(Dropout(0.5))
+model.add(Dense(1, activation='sigmoid'))
+
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# Ранняя остановка
+early_stopping = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+
+# Обучение модели
+history = model.fit(X_train, y_train, epochs=50, batch_size=32, validation_split=0.2, callbacks=[early_stopping])
+
+# Оценка модели
+loss, accuracy = model.evaluate(X_test, y_test)
+print(f'Test Accuracy: {accuracy:.4f}')
