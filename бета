@@ -335,6 +335,6 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_path", type=str, default="recsys_model.pth", help="Путь для сохранения модели")
     parser.add_argument("--example_user", type=str, default="какой-то_md5_покупателя", help="Пример user_id для генерации рекомендаций")
     
-    args = parser.parse_args()
+    # Используем parse_known_args для игнорирования дополнительных аргументов (например, от ipykernel)
+    args, unknown = parser.parse_known_args()
     main(args)
-
