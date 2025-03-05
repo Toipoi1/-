@@ -1,1 +1,340 @@
+#!/usr/bin/env python
+import argparse
+import os
+import sys
+import random
+from typing import List, Tuple, Dict
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+import torch
+from torch import nn
+from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+
+def load_csv(filepath: str, **kwargs) -> pd.DataFrame:
+    """
+    Загружает CSV файл с обработкой исключений.
+    """
+    try:
+        df = pd.read_csv(filepath, **kwargs)
+        print(f"[INFO] Файл '{filepath}' успешно загружен. Форма: {df.shape}")
+        return df
+    except Exception as e:
+        print(f"[ERROR] Не удалось загрузить файл '{filepath}'. Ошибка: {e}")
+        sys.exit(1)
+
+def check_csv_data(df: pd.DataFrame, name: str, required_cols: set = None) -> None:
+    """
+    Проверяет корректность DataFrame: наличие требуемых столбцов, пропусков и аномалий.
+    """
+    print(f"[DEBUG] Проверяем датафрейм '{name}'...")
+    if required_cols:
+        actual_cols = set(df.columns)
+        missing = required_cols - actual_cols
+        assert not missing, f"Ошибка: в '{name}' отсутствуют обязательные столбцы: {missing}"
+        print(f"[DEBUG] Все требуемые столбцы присутствуют в '{name}'.")
+    na_counts = df.isna().sum()
+    na_counts = na_counts[na_counts > 0]
+    if not na_counts.empty:
+        print(f"[WARNING] В '{name}' обнаружены пропуски (NaN):\n{na_counts}")
+    else:
+        print(f"[DEBUG] В '{name}' нет пропусков (NaN).")
+    counter_found = False
+    for col in df.select_dtypes(include='object').columns:
+        mask_counter = df[col].astype(str).str.contains('Counter', case=False, na=False)
+        if mask_counter.any():
+            n_bad = mask_counter.sum()
+            print(f"[WARNING] Найдено {n_bad} значений с 'Counter' в столбце '{col}' в '{name}'.")
+            counter_found = True
+    if not counter_found:
+        print(f"[DEBUG] Не найдено значений 'Counter' в '{name}'.")
+    if 'lot_price' in df.columns:
+        negative_prices = (df['lot_price'] < 0).sum()
+        if negative_prices > 0:
+            print(f"[WARNING] В '{name}' обнаружено {negative_prices} отрицательных значений 'lot_price'.")
+        else:
+            print(f"[DEBUG] В '{name}' отрицательных значений 'lot_price' не найдено.")
+    print(f"[DEBUG] Проверка '{name}' завершена.")
+
+class RecSysDataset(Dataset):
+    """
+    PyTorch Dataset для рекомендательной системы.
+    Для каждого позитивного примера генерируется отрицательный.
+    """
+    def __init__(self, df: pd.DataFrame, user2idx: Dict[str, int],
+                 item2idx: Dict[str, int], all_item_ids: List[int]) -> None:
+        self.df = df
+        self.user2idx = user2idx
+        self.item2idx = item2idx
+        self.all_item_ids = all_item_ids
+        self.samples = []
+        for _, row in df.iterrows():
+            user = row['customer_inn_kpp_md5']
+            item = row['pn_lot']
+            if user in user2idx and item in item2idx:
+                self.samples.append((user2idx[user], item2idx[item]))
+        assert len(self.samples) > 0, "Нет примеров в датасете!"
+    def __len__(self) -> int:
+        return len(self.samples)
+    def __getitem__(self, idx: int) -> Tuple[int, int, int]:
+        user_idx, pos_item_idx = self.samples[idx]
+        neg_item_idx = pos_item_idx
+        while neg_item_idx == pos_item_idx:
+            neg_item_idx = random.choice(self.all_item_ids)
+        return user_idx, pos_item_idx, neg_item_idx
+
+class RecommendationModel(nn.Module):
+    """
+    Рекомендательная модель с двумя башнями для пользователей и товаров.
+    """
+    def __init__(self, num_users: int, num_items: int, embedding_dim: int) -> None:
+        super(RecommendationModel, self).__init__()
+        self.user_embedding = nn.Embedding(num_users, embedding_dim)
+        self.user_mlp = nn.Sequential(
+            nn.Linear(embedding_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, embedding_dim)
+        )
+        self.item_embedding = nn.Embedding(num_items, embedding_dim)
+        self.item_mlp = nn.Sequential(
+            nn.Linear(embedding_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, embedding_dim)
+        )
+    def forward(self, user_idx: torch.Tensor, item_idx: torch.Tensor) -> torch.Tensor:
+        user_emb = self.user_embedding(user_idx)
+        user_vec = self.user_mlp(user_emb)
+        item_emb = self.item_embedding(item_idx)
+        item_vec = self.item_mlp(item_emb)
+        # Проверки согласованности форм
+        assert user_vec.dim() == 2 and item_vec.dim() == 2, "Ожидается 2D тензор для user_vec и item_vec"
+        assert user_vec.size(0) == item_vec.size(0), "Размер батча не совпадает между пользователями и товарами"
+        assert user_vec.size(1) == item_vec.size(1), "Размер эмбеддингов пользователей и товаров должен совпадать"
+        print(f"[DEBUG] user_vec shape: {user_vec.shape}, item_vec shape: {item_vec.shape}")
+        similarity = F.cosine_similarity(user_vec, item_vec, dim=1)
+        return similarity
+
+def evaluate_model(model: RecommendationModel, test_loader: DataLoader,
+                   device: torch.device, k: int = 10) -> Tuple[float, float]:
+    """
+    Вычисляет метрики Hit Rate (HR@k) и NDCG@k на тестовом наборе.
+    """
+    model.eval()
+    hr_total = 0.0
+    ndcg_total = 0.0
+    count = 0
+    with torch.no_grad():
+        for i, batch in enumerate(test_loader):
+            if i >= 10:  # Оценка на первых 10 батчах
+                break
+            user_idx, pos_item_idx, _ = batch
+            user_idx = user_idx.to(device)
+            pos_item_idx = pos_item_idx.to(device)
+            all_items = torch.arange(model.item_embedding.num_embeddings, device=device)
+            user_emb = model.user_embedding(user_idx)
+            user_vec = model.user_mlp(user_emb)
+            user_vec = F.normalize(user_vec, dim=1)
+            item_emb = model.item_embedding(all_items)
+            item_vec = model.item_mlp(item_emb)
+            item_vec = F.normalize(item_vec, dim=1)
+            similarities = torch.matmul(user_vec, item_vec.T)
+            _, topk_indices = torch.topk(similarities, k, dim=1)
+            for j in range(user_idx.size(0)):
+                pos_item = pos_item_idx[j].item()
+                topk = topk_indices[j].tolist()
+                if pos_item in topk:
+                    hr_total += 1
+                    rank = topk.index(pos_item) + 1
+                    ndcg_total += 1.0 / np.log2(rank + 1)
+                count += 1
+    hr = hr_total / count if count > 0 else 0.0
+    ndcg = ndcg_total / count if count > 0 else 0.0
+    return hr, ndcg
+
+def get_top_k_recommendations(model: RecommendationModel, user_id_str: str,
+                              user2idx: Dict[str, int], item2idx: Dict[str, int],
+                              device: torch.device, item_vecs: torch.Tensor,
+                              k: int = 10) -> Tuple[np.ndarray, List[str]]:
+    """
+    Генерирует топ-K рекомендаций для заданного пользователя.
+    """
+    model.eval()
+    if user_id_str not in user2idx:
+        print(f"[ERROR] Пользователь {user_id_str} не найден.")
+        return None, None
+    user_idx = torch.tensor([user2idx[user_id_str]], device=device)
+    with torch.no_grad():
+        user_emb = model.user_embedding(user_idx)
+        user_vec = model.user_mlp(user_emb)
+        user_vec = F.normalize(user_vec, dim=1)
+        print(f"[DEBUG] user_vec shape: {user_vec.shape}")
+        similarities = torch.matmul(user_vec, item_vecs.T).squeeze(0)
+        topk_scores, topk_indices = torch.topk(similarities, k=k)
+        idx2item = {idx: item for item, idx in item2idx.items()}
+        recommended_items = [idx2item[idx.item()] for idx in topk_indices]
+        return topk_scores.cpu().numpy(), recommended_items
+
+def main(args):
+    writer = SummaryWriter(log_dir=args.log_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[INFO] Используется устройство: {device}")
+
+    # Загрузка данных
+    data1 = load_csv(args.data1, low_memory=False)
+    data2 = load_csv(args.data2, low_memory=False)
+    data3 = load_csv(args.data3, low_memory=False)
+
+    # Проверка данных
+    check_csv_data(data1, "data1 (small_2_cleaned.csv)", {"pn_lot", "post_num", "is_winner", "fz"})
+    check_csv_data(data2, "data2 (medium_cleaned.csv)", {"fz", "pn_lot", "item_name", "okpd2_code", "ktru_code", "drug_purchase_object"})
+    check_csv_data(data3, "data3 (high_cleaned.csv)", {"fz", "pn_lot", "region_code", "min_publish_date",
+                                                      "purchase_name", "lot_name", "forsmallbiz", "lot_price",
+                                                      "customer_inn_kpp_md5", "okpd2_code"})
+
+    # Исправление строк с 'Counter'
+    mask_counter_item_name = data2['item_name'].astype(str).str.contains('Counter', case=False, na=False)
+    n_bad_item_name = mask_counter_item_name.sum()
+    if n_bad_item_name > 0:
+        print(f"[DEBUG] Заменяем {n_bad_item_name} строк в data2['item_name'] на 'UNKNOWN'.")
+        data2.loc[mask_counter_item_name, 'item_name'] = 'UNKNOWN'
+    columns_to_fix_data3 = ['purchase_name', 'lot_name', 'customer_inn_kpp_md5', 'okpd2_code']
+    for col in columns_to_fix_data3:
+        if col in data3.columns:
+            mask_counter = data3[col].astype(str).str.contains('Counter', case=False, na=False)
+            n_bad = mask_counter.sum()
+            if n_bad > 0:
+                print(f"[DEBUG] Заменяем {n_bad} строк в data3['{col}'] на 'UNKNOWN'.")
+                data3.loc[mask_counter, col] = 'UNKNOWN'
+
+    # Объединение данных
+    df_12 = pd.merge(data1, data2, on=["fz", "pn_lot"], how="inner")
+    df_123 = pd.merge(df_12, data3, on=["fz", "pn_lot"], how="inner")
+    print(f"[INFO] После merge df_123 shape: {df_123.shape}")
+    object_cols = df_123.select_dtypes(include='object').columns
+    for col in object_cols:
+        mask_counter = df_123[col].astype(str).str.contains('Counter', case=False, na=False)
+        n_bad = mask_counter.sum()
+        if n_bad > 0:
+            print(f"[DEBUG] Заменяем {n_bad} строк в df_123['{col}'] на 'UNKNOWN'.")
+            df_123.loc[mask_counter, col] = 'UNKNOWN'
+
+    # Предобработка данных
+    df_123['is_winner'] = df_123['is_winner'].fillna(0).astype(int)
+    df_123['forsmallbiz'] = df_123['forsmallbiz'].fillna(0).astype(int)
+    df_123['pn_lot'] = df_123['pn_lot'].fillna('UNKNOWN').astype(str)
+    df_123['post_num'] = df_123['post_num'].fillna('000000')
+    df_123['region_code'] = df_123['region_code'].fillna(-1).astype(int)
+    df_123['lot_price'] = df_123['lot_price'].fillna(0.0).astype(np.float32)
+    df_123['customer_inn_kpp_md5'] = df_123['customer_inn_kpp_md5'].fillna('NO_MD5').astype(str)
+    df_123['min_publish_date'] = pd.to_datetime(df_123['min_publish_date'], errors='coerce')
+    df_123 = df_123.dropna(subset=['customer_inn_kpp_md5'])
+    print(f"[INFO] После предобработки df_123 shape: {df_123.shape}")
+
+    # Фильтрация позитивных примеров и разделение на train/test
+    df_positive = df_123[df_123['is_winner'] == 1].copy()
+    assert df_positive.shape[0] > 0, "Нет позитивных примеров (is_winner == 1)"
+    print(f"[INFO] Позитивных примеров (is_winner=1): {df_positive.shape[0]}")
+    train_df, test_df = train_test_split(df_positive, test_size=0.2, random_state=42)
+    print(f"[INFO] Train shape: {train_df.shape}")
+    print(f"[INFO] Test shape: {test_df.shape}")
+    for sub_df, sub_name in [(train_df, "train_df"), (test_df, "test_df")]:
+        obj_cols = sub_df.select_dtypes(include='object').columns
+        for col in obj_cols:
+            mask_counter = sub_df[col].astype(str).str.contains('Counter', case=False, na=False)
+            n_bad = mask_counter.sum()
+            if n_bad > 0:
+                print(f"[DEBUG] Заменяем {n_bad} строк в {sub_name}['{col}'] на 'UNKNOWN'.")
+                sub_df.loc[mask_counter, col] = 'UNKNOWN'
+
+    unique_user_ids = train_df['customer_inn_kpp_md5'].unique().tolist()
+    unique_item_ids = train_df['pn_lot'].unique().tolist()
+    user2idx = {user: idx for idx, user in enumerate(unique_user_ids)}
+    item2idx = {item: idx for idx, item in enumerate(unique_item_ids)}
+    num_users = len(user2idx)
+    num_items = len(item2idx)
+    print(f"[INFO] Unique users: {num_users}, Unique items: {num_items}")
+    all_item_idx_list = list(range(num_items))
+    train_dataset = RecSysDataset(train_df, user2idx, item2idx, all_item_idx_list)
+    test_dataset = RecSysDataset(test_df, user2idx, item2idx, all_item_idx_list)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers)
+
+    model = RecommendationModel(num_users, num_items, args.embedding_dim)
+    model.to(device)
+    print("[INFO] Модель успешно создана и перемещена на устройство.")
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+    criterion = nn.MSELoss()
+
+    for epoch in range(args.epochs):
+        model.train()
+        epoch_loss = 0.0
+        for batch in train_loader:
+            user_idx, pos_item_idx, neg_item_idx = batch
+            user_idx = user_idx.to(device)
+            pos_item_idx = pos_item_idx.to(device)
+            neg_item_idx = neg_item_idx.to(device)
+            optimizer.zero_grad()
+            pos_scores = model(user_idx, pos_item_idx)
+            neg_scores = model(user_idx, neg_item_idx)
+            loss_pos = criterion(pos_scores, torch.ones_like(pos_scores, device=device))
+            loss_neg = criterion(neg_scores, torch.zeros_like(neg_scores, device=device))
+            loss = loss_pos + loss_neg
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * user_idx.size(0)
+        epoch_loss /= len(train_dataset)
+        print(f"[INFO] Epoch {epoch+1}/{args.epochs}, Loss: {epoch_loss:.4f}")
+        writer.add_scalar("Loss/train", epoch_loss, epoch)
+        scheduler.step(epoch_loss)
+        hr, ndcg = evaluate_model(model, test_loader, device, k=10)
+        print(f"[INFO] Validation HR@10: {hr:.4f}, NDCG@10: {ndcg:.4f}")
+        writer.add_scalar("HR/val", hr, epoch)
+        writer.add_scalar("NDCG/val", ndcg, epoch)
+
+    model.eval()
+    with torch.no_grad():
+        all_item_idx_tensor = torch.tensor(all_item_idx_list, device=device)
+        item_emb = model.item_embedding(all_item_idx_tensor)
+        item_vecs = model.item_mlp(item_emb)
+        item_vecs = F.normalize(item_vecs, dim=1)
+        print(f"[DEBUG] Эмбеддинги товаров, shape: {item_vecs.shape}")
+
+    scores, rec_items = get_top_k_recommendations(model, args.example_user, user2idx, item2idx, device, item_vecs, k=10)
+    if scores is not None:
+        print(f"\n[INFO] Пользователь: {args.example_user}\nРекомендованные pn_lot: {rec_items}\nОценки (cosine similarity): {scores}")
+
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'user2idx': user2idx,
+        'item2idx': item2idx,
+        'embedding_dim': args.embedding_dim,
+        'config': vars(args)
+    }
+    torch.save(checkpoint, args.checkpoint_path)
+    print(f"[INFO] Модель успешно сохранена в '{args.checkpoint_path}'")
+    writer.close()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Рекомендательная система на PyTorch без логирования")
+    parser.add_argument("--data1", type=str, default="small_2_cleaned.csv", help="Путь к файлу small_2_cleaned.csv")
+    parser.add_argument("--data2", type=str, default="medium_cleaned.csv", help="Путь к файлу medium_cleaned.csv")
+    parser.add_argument("--data3", type=str, default="high_cleaned.csv", help="Путь к файлу high_cleaned.csv")
+    parser.add_argument("--epochs", type=int, default=5, help="Количество эпох обучения")
+    parser.add_argument("--batch_size", type=int, default=1024, help="Размер батча")
+    parser.add_argument("--embedding_dim", type=int, default=32, help="Размерность эмбеддингов")
+    parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--weight_decay", type=float, default=1e-5, help="L2-регуляризация (weight decay)")
+    parser.add_argument("--num_workers", type=int, default=4, help="Количество воркеров для DataLoader")
+    parser.add_argument("--log_dir", type=str, default="logs", help="Директория для логов TensorBoard")
+    parser.add_argument("--checkpoint_path", type=str, default="recsys_model.pth", help="Путь для сохранения модели")
+    parser.add_argument("--example_user", type=str, default="какой-то_md5_покупателя", help="Пример user_id для генерации рекомендаций")
+    
+    args = parser.parse_args()
+    main(args)
 
