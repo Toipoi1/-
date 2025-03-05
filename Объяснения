@@ -1,0 +1,8 @@
+Мы сделали код через чат гпт. Импортировали билблиотеки 
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+import tensorflow_recommenders as tfrs
+from sklearn.model_selection import train_test_split
+
+Также мы взяли версию Tensorflow 2.11.0 потому что в другой версии просиходит ошибка. мы пытаемся совместить три файла в один по ключевым id. Но на сколько мы понимаем проиходит ошибка с типами данных которые tensorflow не может преоброзавать и считать.
