@@ -1,0 +1,279 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+import tensorflow_recommenders as tfrs
+from sklearn.model_selection import train_test_split
+
+# -----------------------------------------------------------
+# 1. ФУНКЦИЯ ПРОВЕРКИ CSV И ЛОГИРОВАНИЯ
+# -----------------------------------------------------------
+def check_csv_data(df: pd.DataFrame, name: str, required_cols=None):
+    """
+    Проверяет базовую корректность датафрейма:
+    1) Наличие необходимых столбцов (required_cols).
+    2) Пропуски (NaN).
+    3) Наличие строк, содержащих 'Counter'.
+    4) Негативные lot_price (при наличии).
+    """
+    print(f"\nПроверяем датафрейм '{name}'...")
+
+    # 1) Проверка столбцов
+    if required_cols is not None:
+        actual_cols = set(df.columns)
+        missing = required_cols - actual_cols
+        if missing:
+            print(f"[!] ВНИМАНИЕ: В '{name}' отсутствуют обязательные столбцы: {missing}")
+        else:
+            print(f"    OK: Все требуемые столбцы присутствуют в '{name}'.")
+
+    # 2) Пропуски
+    na_counts = df.isna().sum()
+    na_counts = na_counts[na_counts > 0]
+    if not na_counts.empty:
+        print(f"[!] Предупреждение: В '{name}' есть пропуски (NaN) в столбцах:\n{na_counts}")
+    else:
+        print(f"    OK: В '{name}' нет пропусков (NaN).")
+
+    # 3) Проверка 'Counter'
+    counter_found = False
+    for col in df.select_dtypes(include='object').columns:
+        mask_counter = df[col].astype(str).str.contains('Counter', case=False, na=False)
+        if mask_counter.any():
+            n_bad = mask_counter.sum()
+            print(f"[!] Предупреждение: Найдено {n_bad} значений, содержащих 'Counter', в столбце '{col}' датафрейма '{name}'")
+            counter_found = True
+
+    if not counter_found:
+        print(f"    OK: Не найдено строк с 'Counter' в '{name}'.")
+
+    # 4) Если есть lot_price, проверяем отрицательные
+    if 'lot_price' in df.columns:
+        negative_prices = (df['lot_price'] < 0).sum()
+        if negative_prices > 0:
+            print(f"[!] Предупреждение: В '{name}' обнаружено {negative_prices} отрицательных цен (lot_price).")
+        else:
+            print(f"    OK: В '{name}' нет отрицательных значений lot_price.")
+
+    print(f"Проверка '{name}' завершена.\n")
+
+
+# -----------------------------------------------------------
+# 2. ЗАГРУЗКА CSV С low_memory=False (чтобы подавить DtypeWarning)
+# -----------------------------------------------------------
+data1 = pd.read_csv('small_2_cleaned.csv', low_memory=False)   # pn_lot, post_num, is_winner, fz
+data2 = pd.read_csv('medium_cleaned.csv',  low_memory=False)    # fz, pn_lot, item_name, okpd2_code, ktru_code, drug_purchase_object
+data3 = pd.read_csv('high_cleaned.csv',    low_memory=False)    # fz, pn_lot, region_code, min_publish_date, purchase_name, lot_name,
+                                                                # forsmallbiz, lot_price, customer_inn_kpp_md5, okpd2_code
+
+print("data1 shape:", data1.shape)
+print("data2 shape:", data2.shape)
+print("data3 shape:", data3.shape)
+
+# -----------------------------------------------------------
+# 2а. ПРОВЕРКА КАЖДОГО ИЗ ТРЁХ CSV
+# -----------------------------------------------------------
+check_csv_data(
+    data1,
+    name="data1 (small_2_cleaned.csv)",
+    required_cols={"pn_lot", "post_num", "is_winner", "fz"}
+)
+
+check_csv_data(
+    data2,
+    name="data2 (medium_cleaned.csv)",
+    required_cols={"fz", "pn_lot", "item_name", "okpd2_code", "ktru_code", "drug_purchase_object"}
+)
+
+check_csv_data(
+    data3,
+    name="data3 (high_cleaned.csv)",
+    required_cols={"fz", "pn_lot", "region_code", "min_publish_date", "purchase_name",
+                   "lot_name", "forsmallbiz", "lot_price", "customer_inn_kpp_md5", "okpd2_code"}
+)
+
+
+# -----------------------------------------------------------
+# 3. ИСПРАВЛЕНИЕ СТРОК 'COUNTER' В data2
+# -----------------------------------------------------------
+mask_counter_item_name = data2['item_name'].astype(str).str.contains('Counter', case=False, na=False)
+n_bad_item_name = mask_counter_item_name.sum()
+if n_bad_item_name > 0:
+    print(f"\n[!!!] ВНИМАНИЕ: Заменяем {n_bad_item_name} строк в data2['item_name'], содержащих 'Counter', на 'UNKNOWN'.")
+    data2.loc[mask_counter_item_name, 'item_name'] = 'UNKNOWN'
+
+
+# -----------------------------------------------------------
+# 3а. ИСПРАВЛЕНИЕ СТРОК 'COUNTER' В data3 (в нужных столбцах)
+# -----------------------------------------------------------
+# Если нужно, перечисляем столбцы
+columns_to_fix_data3 = ['purchase_name', 'lot_name', 'customer_inn_kpp_md5', 'okpd2_code']
+for col in columns_to_fix_data3:
+    if col in data3.columns:
+        mask_counter = data3[col].astype(str).str.contains('Counter', case=False, na=False)
+        n_bad = mask_counter.sum()
+        if n_bad > 0:
+            print(f"[!!!] ВНИМАНИЕ: Заменяем {n_bad} строк в data3['{col}'], содержащих 'Counter', на 'UNKNOWN'.")
+            data3.loc[mask_counter, col] = 'UNKNOWN'
+
+# -----------------------------------------------------------
+# 4. ОБЪЕДИНЕНИЕ
+# -----------------------------------------------------------
+df_12 = pd.merge(data1, data2, on=["fz", "pn_lot"], how="inner")
+df_123 = pd.merge(df_12, data3, on=["fz", "pn_lot"], how="inner")
+
+print("\nПосле merge df_123 shape:", df_123.shape)
+
+
+# -----------------------------------------------------------
+# 5. ГЛОБАЛЬНАЯ ОЧИСТКА 'COUNTER' В УЖЕ ОБЪЕДИНЁННОМ df_123
+# -----------------------------------------------------------
+object_cols = df_123.select_dtypes(include='object').columns
+for col in object_cols:
+    mask_counter = df_123[col].astype(str).str.contains('Counter', case=False, na=False)
+    n_bad = mask_counter.sum()
+    if n_bad > 0:
+        print(f"[!!!] Заменяем {n_bad} строк в df_123['{col}'], содержащих 'Counter', на 'UNKNOWN'.")
+        df_123.loc[mask_counter, col] = 'UNKNOWN'
+
+
+# -----------------------------------------------------------
+# 6. Предобработка df_123
+# -----------------------------------------------------------
+df_123['is_winner'] = df_123['is_winner'].fillna(0).astype(int)
+df_123['forsmallbiz'] = df_123['forsmallbiz'].fillna(0).astype(int)
+
+df_123['pn_lot'] = df_123['pn_lot'].fillna('UNKNOWN').astype(str)
+df_123['post_num'] = df_123['post_num'].fillna('000000')
+df_123['region_code'] = df_123['region_code'].fillna(-1).astype(int)
+df_123['lot_price'] = df_123['lot_price'].fillna(0.0).astype(np.float32)
+
+df_123['customer_inn_kpp_md5'] = df_123['customer_inn_kpp_md5'].fillna('NO_MD5').astype(str)
+df_123['min_publish_date'] = pd.to_datetime(df_123['min_publish_date'], errors='coerce')
+
+df_123 = df_123.dropna(subset=['customer_inn_kpp_md5'])
+
+# -----------------------------------------------------------
+# 7. Фильтрация на позитивные примеры
+# -----------------------------------------------------------
+df_positive = df_123[df_123['is_winner'] == 1].copy()
+print("Позитивных примеров (is_winner=1):", df_positive.shape[0])
+
+train_df, test_df = train_test_split(df_positive, test_size=0.2, random_state=42)
+print("Train shape:", train_df.shape)
+print("Test shape:", test_df.shape)
+
+
+# -----------------------------------------------------------
+# 7a. (ОПЦИОНАЛЬНО) ВЫЧИЩАЕМ 'COUNTER' ИЗ train_df/test_df
+# -----------------------------------------------------------
+for sub_df, sub_name in [(train_df, "train_df"), (test_df, "test_df")]:
+    obj_cols = sub_df.select_dtypes(include='object').columns
+    for col in obj_cols:
+        mask_counter = sub_df[col].astype(str).str.contains('Counter', case=False, na=False)
+        n_bad = mask_counter.sum()
+        if n_bad > 0:
+            print(f"[!!!] Заменяем {n_bad} строк в {sub_name}['{col}'], содержащих 'Counter', на 'UNKNOWN'.")
+            sub_df.loc[mask_counter, col] = 'UNKNOWN'
+
+
+# -----------------------------------------------------------
+# 8. Преобразование в tf.data.Dataset
+# -----------------------------------------------------------
+def df_to_dataset(dataframe, batch_size=1024):
+    dataframe['pn_lot'] = dataframe['pn_lot'].fillna("UNKNOWN").astype(str)
+    dataframe['customer_inn_kpp_md5'] = dataframe['customer_inn_kpp_md5'].fillna("NO_MD5").astype(str)
+    ds = tf.data.Dataset.from_tensor_slices({ 'customer_inn_kpp_md5': dataframe['customer_inn_kpp_md5'],
+        'pn_lot': dataframe['pn_lot']
+    })
+    ds = ds.shuffle(buffer_size=len(dataframe))
+    ds = ds.batch(batch_size)
+    return ds
+
+train_ds = df_to_dataset(train_df)
+test_ds = df_to_dataset(test_df)
+
+# -----------------------------------------------------------
+# 9. Уникальные ID
+# -----------------------------------------------------------
+unique_user_ids = train_df['customer_inn_kpp_md5'].unique().tolist()
+unique_item_ids = train_df['pn_lot'].unique().tolist()
+
+user_ids_vocabulary = tf.keras.layers.StringLookup(mask_token=None)
+user_ids_vocabulary.adapt(unique_user_ids)
+
+item_ids_vocabulary = tf.keras.layers.StringLookup(mask_token=None)
+item_ids_vocabulary.adapt(unique_item_ids)
+
+embedding_dim = 32
+
+# -----------------------------------------------------------
+# 10. RetrievalModel
+# -----------------------------------------------------------
+class RetrievalModel(tfrs.Model):
+    def __init__(self,
+                 user_vocab: tf.keras.layers.StringLookup,
+                 item_vocab: tf.keras.layers.StringLookup,
+                 embedding_dim: int):
+        super().__init__()
+        
+        # Башня пользователя
+        self.user_embedding = tf.keras.Sequential([
+            user_vocab,
+            tf.keras.layers.Embedding(user_vocab.vocabulary_size(), embedding_dim)
+        ])
+        
+        # Башня лотов
+        self.item_embedding = tf.keras.Sequential([
+            item_vocab,
+            tf.keras.layers.Embedding(item_vocab.vocabulary_size(), embedding_dim)
+        ])
+        
+        self.task = tfrs.tasks.Retrieval(
+            metrics=tfrs.metrics.FactorizedTopK(
+                tf.data.Dataset.from_tensor_slices(unique_item_ids)
+                  .batch(128)
+                  .map(lambda batch_x: (batch_x, self.item_embedding(item_vocab(batch_x))))
+            )
+        )
+    
+    def compute_loss(self, features, training=False):
+        user_ids = features["customer_inn_kpp_md5"]
+        lot_ids = features["pn_lot"]
+        
+        user_embeddings = self.user_embedding(user_ids)
+        lot_embeddings = self.item_embedding(lot_ids)
+        
+        return self.task(user_embeddings, lot_embeddings)
+
+# -----------------------------------------------------------
+# 11. Создание и обучение модели
+# -----------------------------------------------------------
+model = RetrievalModel(
+    user_vocab=user_ids_vocabulary,
+    item_vocab=item_ids_vocabulary,
+    embedding_dim=embedding_dim
+)
+model.compile(optimizer=tf.keras.optimizers.Adagrad(learning_rate=0.1))
+
+model.fit(
+    train_ds,
+    validation_data=test_ds,
+    epochs=5
+)
+
+# -----------------------------------------------------------
+# 12. Построение индекса и рекомендации
+# -----------------------------------------------------------
+index = tfrs.layers.factorized_top_k.BruteForce(model.user_embedding)
+index.index_from_dataset(
+    tf.data.Dataset.from_tensor_slices(unique_item_ids)
+        .batch(128)
+        .map(lambda batch_x: (batch_x, model.item_embedding(item_ids_vocabulary(batch_x))))
+)
+
+example_user = "какой-то_md5_покупателя"
+scores, lot_recs = index(tf.constant([example_user]))
+
+print("\nПользователь:", example_user)
+print("Рекомендованные pn_lot:", lot_recs[0, :5].numpy())
+print("Оценки (scores):", scores[0, :5].numpy())  
