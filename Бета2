@@ -1,1 +1,13 @@
+usage: ipykernel_launcher.py [-h] [--data1 DATA1] [--data2 DATA2]
+                             [--data3 DATA3] [--epochs EPOCHS]
+                             [--batch_size BATCH_SIZE]
+                             [--embedding_dim EMBEDDING_DIM]
+                             [--learning_rate LEARNING_RATE]
+                             [--weight_decay WEIGHT_DECAY]
+                             [--num_workers NUM_WORKERS] [--log_dir LOG_DIR]
+                             [--checkpoint_path CHECKPOINT_PATH]
+                             [--example_user EXAMPLE_USER]
+ipykernel_launcher.py: error: unrecognized arguments: --f=c:\Users\clenf\AppData\Roaming\jupyter\runtime\kernel-v306dbc36f9d2fdd90b2507897f7bcd42f9e378286.json
+An exception has occurred, use %tb to see the full traceback.
 
+SystemExit: 2
