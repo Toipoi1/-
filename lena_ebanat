@@ -182,15 +182,18 @@ for sub_df, sub_name in [(train_df, "train_df"), (test_df, "test_df")]:
 def df_to_dataset(dataframe, batch_size=1024):
     dataframe['pn_lot'] = dataframe['pn_lot'].fillna("UNKNOWN").astype(str)
     dataframe['customer_inn_kpp_md5'] = dataframe['customer_inn_kpp_md5'].fillna("NO_MD5").astype(str)
-    ds = tf.data.Dataset.from_tensor_slices({ 'customer_inn_kpp_md5': dataframe['customer_inn_kpp_md5'],
+    
+    # Преобразуем строки в индексы
+    dataframe['customer_inn_kpp_md5'] = user_ids_vocabulary(dataframe['customer_inn_kpp_md5'])
+    dataframe['pn_lot'] = item_ids_vocabulary(dataframe['pn_lot'])
+    
+    ds = tf.data.Dataset.from_tensor_slices({
+        'customer_inn_kpp_md5': dataframe['customer_inn_kpp_md5'],
         'pn_lot': dataframe['pn_lot']
     })
     ds = ds.shuffle(buffer_size=len(dataframe))
     ds = ds.batch(batch_size)
     return ds
-
-train_ds = df_to_dataset(train_df)
-test_ds = df_to_dataset(test_df)
 
 # -----------------------------------------------------------
 # 9. Уникальные ID
@@ -255,6 +258,9 @@ model = RetrievalModel(
 )
 model.compile(optimizer=tf.keras.optimizers.Adagrad(learning_rate=0.1))
 
+train_ds = df_to_dataset(train_df)
+test_ds = df_to_dataset(test_df)
+
 model.fit(
     train_ds,
     validation_data=test_ds,
@@ -276,4 +282,4 @@ scores, lot_recs = index(tf.constant([example_user]))
 
 print("\nПользователь:", example_user)
 print("Рекомендованные pn_lot:", lot_recs[0, :5].numpy())
-print("Оценки (scores):", scores[0, :5].numpy())  
+print("Оценки (scores):", scores[0, :5].numpy())
