@@ -1,0 +1,139 @@
+import pandas as pd
+
+# Путь к папке с данными
+path = r"C:\Users\clenf\Desktop\универ\питон\ВТСК_280\Попытка_номер_2\\"
+
+# Загрузка данных (если они уже не загружены)
+df_purchases = pd.read_csv(
+    path + 'ml_model_training_data_2024_10_15_202412042031.csv',
+    sep=',',
+    encoding='utf-8',
+    low_memory=False,
+    dtype={
+        'lot_name': str,
+        'okpd2_code': str,
+        'customer_inn_kpp_md5': str
+    },
+    parse_dates=['min_publish_date']
+)
+
+df_participants = pd.read_csv(
+    path + 'ml_model_participants_post_num.csv',
+    sep=',',
+    encoding='utf-8'
+)
+
+df_items = pd.read_csv(
+    path + 'ml_model_training_data_items_2024_10_15_202412042038.csv',
+    sep=',',
+    encoding='utf-8'
+)
+
+# Предварительная обработка данных (если она уже не выполнена)
+df_purchases.drop_duplicates(subset=['pn_lot'], inplace=True)
+df_participants.drop_duplicates(subset=['pn_lot', 'post_num'], inplace=True)
+df_items.drop_duplicates(subset=['pn_lot', 'item_name'], inplace=True)
+
+df_purchases['lot_price'] = df_purchases['lot_price'].fillna(0)
+df_purchases['region_code'] = df_purchases['region_code'].fillna(-1)
+df_purchases['okpd2_code'] = df_purchases['okpd2_code'].fillna('unknown')
+
+df_items['okpd2_code'] = df_items['okpd2_code'].fillna('unknown')
+df_items['ktru_code'] = df_items['ktru_code'].fillna('unknown')
+
+df_items_agg = df_items.groupby('pn_lot')['okpd2_code'].apply(list).reset_index()
+df_items_agg.rename(columns={'okpd2_code': 'list_okpd2_items'}, inplace=True)
+
+df_merged = pd.merge(df_purchases, df_items_agg, on='pn_lot', how='left')
+
+# Формирование профиля поставщика
+df_particip_with_purchases = pd.merge(
+    df_participants,
+    df_purchases[['pn_lot', 'fz', 'region_code', 'lot_price']],
+    on=['pn_lot', 'fz'],
+    how='left'
+)
+
+supplier_grouped = df_particip_with_purchases.groupby('post_num').agg({
+    'pn_lot': 'count',
+    'is_winner': 'sum',
+    'lot_price': ['mean', 'min', 'max']
+}).reset_index()
+
+supplier_grouped.columns = [
+    'post_num',
+    'count_particip',
+    'count_win',
+    'avg_price',
+    'min_price',
+    'max_price'
+]
+
+supplier_grouped['win_rate'] = supplier_grouped['count_win'] / supplier_grouped['count_particip']
+supplier_grouped.fillna(0, inplace=True)
+
+region_pivot = df_particip_with_purchases.groupby(['post_num', 'region_code'])\
+    .size().reset_index(name='cnt_region')
+
+df_particip_extended = pd.merge(
+    df_particip_with_purchases,
+    df_items_agg,
+    on='pn_lot',
+    how='left'
+)
+df_particip_extended = df_particip_extended.explode('list_okpd2_items')
+
+okpd2_pivot = df_particip_extended.groupby(['post_num', 'list_okpd2_items'])\
+    .size().reset_index(name='cnt_okpd2')
+
+# Функция для ручного ввода данных о лоте
+def input_lot_profile():
+    """
+    Ручной ввод данных о лоте.
+    """
+    print("Введите данные о лоте:")
+    pn_lot = input("ID лота (pn_lot): ")
+    region_code = int(input("Код региона (region_code): "))
+    lot_price = float(input("Цена лота (lot_price): "))
+    okpd2_items = input("Список кодов ОКПД2 (через запятую): ").split(',')
+
+    # Формируем профиль лота
+    lot_profile = {
+        'pn_lot': pn_lot,
+        'region_code': region_code,
+        'lot_price': lot_price,
+        'okpd2_items': [item.strip() for item in okpd2_items]
+    }
+    return lot_profile
+
+# Основная функция для генерации рекомендаций
+def generate_recommendations(lot_profile):
+    """
+    Генерация рекомендаций на основе введённого профиля лота.
+    """
+    # Фильтрация кандидатов с fallback
+    filtered_suppliers = filter_candidates_with_multilevel_fallback(lot_profile,
+                                                                   supplier_grouped,
+                                                                   region_pivot,
+                                                                   okpd2_pivot)
+    if filtered_suppliers.empty:
+        print("Нет поставщиков даже после всех fallback-критериев!")
+    else:
+        # Ранжирование
+        ranked_suppliers = rank_suppliers_for_lot(lot_profile,
+                                                  filtered_suppliers,
+                                                  region_pivot,
+                                                  okpd2_pivot)
+        top_10 = ranked_suppliers.head(10)
+
+        # Вывод топ-10 поставщиков
+        print("\n=== TOP-10 поставщиков ===")
+        print(top_10[['post_num', 'score', 'win_rate', 'avg_price']].to_string(index=False))
+
+# Запуск программы
+if __name__ == "__main__":
+    # Ввод данных о лоте
+    lot_profile = input_lot_profile()
+
+    # Генерация рекомендаций
+    generate_recommendations(lot_profile)
