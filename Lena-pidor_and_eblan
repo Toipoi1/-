@@ -1,0 +1,638 @@
+import numpy as np
+import pandas as pd
+import os
+from scipy.sparse import coo_matrix
+import implicit
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score
+
+# Функции для очистки данных
+def remove_empty_rows(df):
+    """
+    Удаляет пустые строки из DataFrame.
+    """
+    initial_rows = len(df)
+    df.dropna(how='all', inplace=True)
+    removed_rows = initial_rows - len(df)
+    return df, removed_rows
+
+def remove_duplicates(df):
+    """
+    Удаляет дубликаты строк из DataFrame.
+    """
+    initial_rows = len(df)
+    df.drop_duplicates(inplace=True)
+    removed_rows = initial_rows - len(df)
+    return df, removed_rows
+
+def remove_low_prices(df, column_name="lot_price", lower_bound=0, upper_bound=100):
+    """
+    Удаляет строки, где значение в указанном столбце находится в диапазоне [lower_bound, upper_bound].
+    """
+    if column_name not in df.columns:
+        print(f"Предупреждение: столбец {column_name} отсутствует. Пропуск.")
+        return df, 0
+    
+    if not np.issubdtype(df[column_name].dtype, np.number):
+        print(f"Предупреждение: столбец {column_name} должен быть числовым. Пропуск.")
+        return df, 0
+    
+    initial_rows = len(df)
+    # Удаляем строки, где значения находятся в диапазоне [lower_bound, upper_bound]
+    df = df[(df[column_name] < lower_bound) | (df[column_name] > upper_bound)]
+    removed_rows = initial_rows - len(df)
+    return df, removed_rows
+
+def remove_outliers(df, column_name):
+    """
+    Удаляет выбросы по указанному числовому столбцу и возвращает их.
+    """
+    if column_name not in df.columns:
+        print(f"Предупреждение: столбец {column_name} отсутствует. Пропуск.")
+        return df, pd.DataFrame(), 0
+    
+    if not np.issubdtype(df[column_name].dtype, np.number):
+        print(f"Предупреждение: столбец {column_name} должен быть числовым. Пропуск.")
+        return df, pd.DataFrame(), 0
+    
+    initial_rows = len(df)
+    mean = df[column_name].mean()
+    std = df[column_name].std()
+    lower_bound = mean - 3 * std
+    upper_bound = mean + 3 * std
+    # Выделяем выбросы
+    outliers = df[(df[column_name] < lower_bound) | (df[column_name] > upper_bound)]
+    # Оставляем строки без выбросов
+    df = df[(df[column_name] >= lower_bound) & (df[column_name] <= upper_bound)]
+    removed_rows = initial_rows - len(df)
+    return df, outliers, removed_rows
+
+def process_files(file_paths, output_dir, outliers_dir):
+    """
+    Обрабатывает файлы CSV, удаляя пустые строки, дубликаты, строки с lot_price в диапазоне [0, 100] и выбросы.
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    if not os.path.exists(outliers_dir):
+        os.makedirs(outliers_dir)
+    
+    total_removed = {"empty_rows": 0, "duplicates": 0, "low_prices": 0, "outliers": 0}
+    
+    for file_path in file_paths:
+        print(f"Обработка файла: {file_path}")
+        # Чтение файла
+        df = pd.read_csv(file_path)
+        
+        # Удаление пустых строк
+        df, removed_empty = remove_empty_rows(df)
+        total_removed["empty_rows"] += removed_empty
+        
+        # Удаление дубликатов
+        df, removed_duplicates_count = remove_duplicates(df)
+        total_removed["duplicates"] += removed_duplicates_count
+        
+        # Удаление строк с lot_price в диапазоне [0, 100]
+        if "ml_model_training_data_" in file_path.lower() and "lot_price" in df.columns:
+            df, removed_low_prices_count = remove_low_prices(df, "lot_price", lower_bound=0, upper_bound=100)
+            total_removed["low_prices"] += removed_low_prices_count
+            
+            # Удаление выбросы и сохранение в отдельный файл
+            df, outliers, removed_outliers_count = remove_outliers(df, "lot_price")
+            total_removed["outliers"] += removed_outliers_count
+            
+            # Сохраняем выбросы в отдельный файл
+            outliers_file = os.path.join(outliers_dir, f"outliers_{os.path.basename(file_path)}")
+            if not outliers.empty:
+                outliers.to_csv(outliers_file, index=False)
+                print(f"Выбросы сохранены: {outliers_file}")
+        
+        # Сохранение обработанного файла
+        output_file = os.path.join(output_dir, os.path.basename(file_path))
+        df.to_csv(output_file, index=False)
+        print(f"Файл сохранен: {output_file}")
+    
+    print("\nИтоги обработки:")
+    print(f"Удалено пустых строк: {total_removed['empty_rows']}")
+    print(f"Удалено дубликатов: {total_removed['duplicates']}")
+    print(f"Удалено строк с lot_price в диапазоне [0, 100]: {total_removed['low_prices']}")
+    print(f"Удалено выбросов: {total_removed['outliers']}")
+
+# Основной код
+def main():
+    # Путь к папке с данными
+    path = r"C:\Users\clenf\Desktop\универ\питон\ВТСК_280\Попытка_номер_2\\"
+
+    # Обработка файлов
+    input_files = [
+        path + 'ml_model_participants_post_num.csv',
+        path + 'ml_model_training_data_2024_10_15_202412042031.csv',
+        path + 'ml_model_training_data_items_2024_10_15_202412042038.csv'
+    ]
+    output_directory = path + "cleaned_files"
+    outliers_directory = path + "outliers_files"
+    process_files(input_files, output_directory, outliers_directory)
+
+    # Загрузка очищенных данных
+    df_purchases = pd.read_csv(
+        output_directory + '\\ml_model_training_data_2024_10_15_202412042031.csv',
+        sep=',',
+        encoding='utf-8',
+        low_memory=False,
+        dtype={
+            'lot_name': str,
+            'okpd2_code': str,
+            'customer_inn_kpp_md5': str
+        },
+        parse_dates=['min_publish_date']  # колонка с датой
+    )
+
+    df_participants = pd.read_csv(
+        output_directory + '\\ml_model_participants_post_num.csv',
+        sep=',',
+        encoding='utf-8'
+    )
+
+    df_items = pd.read_csv(
+        output_directory + '\\ml_model_training_data_items_2024_10_15_202412042038.csv',
+        sep=',',
+        encoding='utf-8'
+    )
+
+    # 1.2. Быстрый просмотр (для отладки/анализа)
+    print("=== df_purchases ===")
+    print(df_purchases.head())
+    print(df_purchases.info())
+
+    print("\n=== df_participants ===")
+    print(df_participants.head())
+    print(df_participants.info())
+
+    print("\n=== df_items ===")
+    print(df_items.head())
+    print(df_items.info())
+
+    # 2.1. Удаление дубликатов (на всякий случай)
+    df_purchases.drop_duplicates(subset=['pn_lot'], inplace=True)
+    df_participants.drop_duplicates(subset=['pn_lot', 'post_num'], inplace=True)
+    df_items.drop_duplicates(subset=['pn_lot', 'item_name'], inplace=True)
+
+    # 2.2. Обработка пропусков
+    df_purchases['lot_price'] = df_purchases['lot_price'].fillna(0)
+    df_purchases['region_code'] = df_purchases['region_code'].fillna(-1)
+    df_purchases['okpd2_code'] = df_purchases['okpd2_code'].fillna('unknown')
+
+    df_items['okpd2_code'] = df_items['okpd2_code'].fillna('unknown')
+    df_items['ktru_code'] = df_items['ktru_code'].fillna('unknown')
+
+    # 2.3. Создадим агрегат по товарам (чтобы иметь список окпд2-кодов в одной строке)
+    df_items_agg = df_items.groupby('pn_lot')['okpd2_code'].apply(list).reset_index()
+    df_items_agg.rename(columns={'okpd2_code': 'list_okpd2_items'}, inplace=True)
+
+    # 2.4. Объединим df_purchases и df_items_agg
+    df_merged = pd.merge(df_purchases, df_items_agg, on='pn_lot', how='left')
+
+    # 3.1. Объединим участников с базовой инфой о закупке (регион, цена и т.д.)
+    df_particip_with_purchases = pd.merge(
+        df_participants,
+        df_purchases[['pn_lot', 'fz', 'region_code', 'lot_price']],
+        on=['pn_lot', 'fz'],  # если фз важно, иначе on='pn_lot'
+        how='left'
+    )
+
+    # 3.2. Собираем базовую статистику: кол-во участий, побед, ценовой диапазон
+    df_particip_with_purchases = df_particip_with_purchases[[
+        'post_num', 'pn_lot', 'is_winner', 'region_code', 'lot_price'
+    ]]
+
+    supplier_grouped = df_particip_with_purchases.groupby('post_num').agg({
+        'pn_lot': 'count',       # общее кол-во участий
+        'is_winner': 'sum',      # общее кол-во побед
+        'lot_price': ['mean','min','max']
+    }).reset_index()
+
+    supplier_grouped.columns = [
+        'post_num',
+        'count_particip',
+        'count_win',
+        'avg_price',
+        'min_price',
+        'max_price'
+    ]
+
+    supplier_grouped['win_rate'] = supplier_grouped['count_win'] / supplier_grouped['count_particip']
+    supplier_grouped.fillna(0, inplace=True)
+
+    # 3.3. Считаем частоту регионов
+    region_pivot = df_particip_with_purchases.groupby(['post_num', 'region_code'])\
+        .size().reset_index(name='cnt_region')
+
+    # 3.4. Считаем частоту окпд2 (мелкозернистая детализация) => окpd2_pivot
+    df_particip_extended = pd.merge(
+        df_particip_with_purchases,
+        df_items_agg,  # list_okpd2_items
+        on='pn_lot',
+        how='left'
+    )
+    df_particip_extended = df_particip_extended.explode('list_okpd2_items')
+
+    okpd2_pivot = df_particip_extended.groupby(['post_num', 'list_okpd2_items'])\
+        .size().reset_index(name='cnt_okpd2')
+
+    # 4. Функция формирования «профиля» закупки (для нового pn_lot)
+    def get_lot_profile(pn_lot_id, df_merged):
+        row_df = df_merged[df_merged['pn_lot'] == pn_lot_id]
+        if row_df.empty:
+            print(f"ВНИМАНИЕ: pn_lot={pn_lot_id} не найден в df_merged.")
+            return None
+
+        row = row_df.iloc[0]
+        lot_profile = {
+            'pn_lot': row['pn_lot'],
+            'region_code': row['region_code'],
+            'lot_price': row['lot_price'],
+            'okpd2_items': row.get('list_okpd2_items', [])
+        }
+        # Преобразуем в множество, чтоб потом удобнее фильтровать
+        if lot_profile['okpd2_items'] is None:
+            lot_profile['okpd2_items'] = []
+        return lot_profile
+
+    # 5. Контентно-ориентированный фильтр и ранжирование
+    def filter_candidates(lot_profile, supplier_info, region_pivot, okpd2_pivot,
+                          region_strict=True, price_margin=0.2, consider_okpd2=True):
+        """
+        lot_profile : dict { 'pn_lot', 'region_code', 'lot_price', 'okpd2_items' }
+        supplier_info : df (supplier_grouped) со столбцами: [post_num, min_price, max_price, avg_price, win_rate...]
+        region_pivot : df(post_num, region_code, cnt_region)
+        okpd2_pivot : df(post_num, list_okpd2_items, cnt_okpd2)
+        region_strict : True => точное совпадение region_code, False => не учитываем регион
+        price_margin : допустимое отклонение, если 0.2 => ±20% (условно) от min/max
+        consider_okpd2 : учитывать ли фильтр по окпд2
+        """
+        lot_price = lot_profile['lot_price']
+        region_code = lot_profile['region_code']
+        okpd2_items = set(lot_profile['okpd2_items'])
+
+        # Фильтр региона
+        if region_strict:
+            suppliers_in_region = region_pivot[region_pivot['region_code'] == region_code]['post_num'].unique()
+            cond_region = supplier_info['post_num'].isin(suppliers_in_region)
+        else:
+            cond_region = True  # не фильтруем по региону
+
+        # Фильтр цены
+        # Используем min_price * (1 - price_margin) <= lot_price <= max_price * (1 + price_margin)
+        cond_price_min = supplier_info['min_price'] * (1 - price_margin) <= lot_price
+        cond_price_max = supplier_info['max_price'] * (1 + price_margin) >= lot_price
+        cond_price = cond_price_min & cond_price_max
+
+        filtered = supplier_info[cond_region & cond_price].copy()
+
+        # Фильтр по окпд2
+        if consider_okpd2 and len(okpd2_items) > 0:
+            okpd2_suitable = okpd2_pivot[okpd2_pivot['list_okpd2_items'].isin(okpd2_items)]
+            suitable_postnums = okpd2_suitable['post_num'].unique()
+            filtered = filtered[filtered['post_num'].isin(suitable_postnums)]
+
+        return filtered
+
+    def compute_score(lot_profile, supplier_row, region_pivot, okpd2_pivot):
+        """
+        Вычисляем скор (score) для одного поставщика = combination(регион, цена, win_rate, окpd2).
+        """
+        region_code = lot_profile['region_code']
+        lot_price = lot_profile['lot_price']
+        lot_okpd2 = set(lot_profile['okpd2_items'])
+
+        # 1) Региональный вес
+        reg_count = region_pivot[
+            (region_pivot['post_num'] == supplier_row['post_num']) &
+            (region_pivot['region_code'] == region_code)
+        ]['cnt_region']
+        region_factor = reg_count.iloc[0] if len(reg_count) > 0 else 0
+
+        # 2) Цена
+        avg_price = supplier_row['avg_price']
+        # Чем ближе lot_price к avg_price, тем выше factor
+        price_factor = 1.0 / (1.0 + abs(lot_price - avg_price) / (avg_price + 1))
+
+        # 3) Win_rate
+        win_rate_factor = supplier_row['win_rate']  # 0..1
+
+        # 4) OKПД2 overlap
+        supplier_okpd2 = okpd2_pivot[okpd2_pivot['post_num'] == supplier_row['post_num']]
+        overlap = supplier_okpd2[supplier_okpd2['list_okpd2_items'].isin(lot_okpd2)]['cnt_okpd2'].sum()
+
+        # Весовая схема (пример):
+        score = region_factor * 0.2 + price_factor * 0.3 + win_rate_factor * 0.3 + overlap * 0.2
+        return score
+
+    def rank_suppliers_for_lot(lot_profile, filtered_suppliers, region_pivot, okpd2_pivot):
+        """
+        Рассчитываем score для каждого поставщика из filtered_suppliers и сортируем.
+        """
+        scores = []
+        for idx, row in filtered_suppliers.iterrows():
+            s = compute_score(lot_profile, row, region_pivot, okpd2_pivot)
+            scores.append(s)
+        filtered_suppliers['score'] = scores
+        ranked = filtered_suppliers.sort_values(by='score', ascending=False)
+        return ranked
+
+    # 6. Формирование итоговых рекомендаций (top-N) + fallback/углублённый анализ
+    def refine_ranking_with_detailed_items(ranked_suppliers, df_items, okpd2_pivot_deep=None):
+        """
+        Второй уровень уточнения ранга, если кандидатов слишком много (>500).
+        Пример: смотрим, насколько глубоко совпадают товары.
+
+        ranked_suppliers: DataFrame со столбцами [post_num, pn_lot, score, ...]
+        df_items: таблица с детализацией, столбцы: [pn_lot, item_name, okpd2_code, ...]
+        okpd2_pivot_deep: словарь/df, где учтены частоты побед по конкретным детальным кодам
+                          (можно расширять идею).
+        """
+        # Для примера пусть мы просто подсчитаем число уникальных позиций,
+        # где поставщик побеждал в точном okpd2_code
+        if okpd2_pivot_deep is None:
+            # Псевдо-профиль. Можно расширить
+            okpd2_pivot_deep = {}
+
+        new_scores = []
+        for idx, row in ranked_suppliers.iterrows():
+            pn_lot_id = row['pn_lot']
+            post_num = row['post_num']
+            base_score = row['score']
+
+            # Найдём позиции конкретного лота
+            lot_positions = df_items[df_items['pn_lot'] == pn_lot_id]
+
+            # Упрощённый overlap
+            deep_overlap = 0
+            for iidx, item_row in lot_positions.iterrows():
+                code = item_row['okpd2_code']
+                # если считаем, что okpd2_pivot_deep[(post_num, code)] = число побед
+                if (post_num, code) in okpd2_pivot_deep:
+                    deep_overlap += okpd2_pivot_deep[(post_num, code)]
+
+            # Допустим, добавим 0.1 * deep_overlap к базовому скору
+            new_score = base_score + 0.1 * deep_overlap
+            new_scores.append(new_score)
+
+        ranked_suppliers['score_refined'] = new_scores
+        result = ranked_suppliers.sort_values(by='score_refined', ascending=False)
+        return result
+
+    def filter_candidates_with_fallback(lot_profile, supplier_info, region_pivot, okpd2_pivot):
+        """
+        Пытаемся сначала жёсткие условия (region_strict=True, consider_okpd2=True).
+        Если ничего не нашли, ослабляем (region_strict=False, consider_okpd2=False).
+        """
+        # 1) Базовая фильтрация
+        base_filtered = filter_candidates(
+            lot_profile,
+            supplier_info,
+            region_pivot,
+            okpd2_pivot,
+            region_strict=True,
+            price_margin=0.2,
+            consider_okpd2=True
+        )
+        if not base_filtered.empty:
+            return base_filtered
+        else:
+            print("=== Fallback: ослабляем критерии ===")
+            # 2) Ослабляем
+            fallback_filtered = filter_candidates(
+                lot_profile,
+                supplier_info,
+                region_pivot,
+                okpd2_pivot,
+                region_strict=False,
+                price_margin=0.5,  # ценовой порог расширили
+                consider_okpd2=False  # игнорируем окпд2
+            )
+            return fallback_filtered
+
+    # 7. Демонстрация использования
+    # Допустим, у нас есть лот (из df_merged), для которого хотим получить рекомендации:
+    test_pn_lot = '0372200105021000289_'  # пример ID
+
+    print("\n=== Генерируем рекомендации для лота ===", test_pn_lot)
+    lot_profile = get_lot_profile(test_pn_lot, df_merged)
+    if lot_profile is None:
+        print("Нет такой закупки в df_merged!")
+    else:
+        # Пытаемся отфильтровать поставщиков (с fallback)
+        filtered_suppliers = filter_candidates_with_fallback(lot_profile, supplier_grouped, region_pivot, okpd2_pivot)
+        if filtered_suppliers.empty:
+            print("Не найдено ни одного поставщика даже после fallback!")
+        else:
+            # Ранжируем
+            filtered_suppliers['pn_lot'] = lot_profile['pn_lot']
+            ranked_suppliers = rank_suppliers_for_lot(lot_profile, filtered_suppliers, region_pivot, okpd2_pivot)
+            n_candidates = len(ranked_suppliers)
+            print(f"Всего кандидатов после фильтрации: {n_candidates}")
+
+            if n_candidates > 500:
+                print("Кандидатов очень много, свыше 500. Переходим к уточнённому ранжированию (потоварка).")
+                top_500 = ranked_suppliers.head(500)
+                # Пример: если хотим учесть какую-то "глубокую" статистику okpd2 -> можно передать её в refine_ranking...
+                refined_500 = refine_ranking_with_detailed_items(top_500, df_items, okpd2_pivot_deep=None)
+                top_10 = refined_500.head(10)
+            else:
+                print(f"Кандидатов меньше 500 ({n_candidates}). Второй уровень ранжирования не требуется.")
+                top_10 = ranked_suppliers.head(10)
+
+            # Красивый вывод top-10
+            top_10_format = top_10[['post_num','score','win_rate','avg_price']].copy()
+            top_10_format['avg_price'] = top_10_format['avg_price'].apply(lambda x: f"{x:,.2f}")
+            print("\n=== TOP-10 поставщиков ===")
+            print(top_10_format.to_string(index=False))
+
+            # Дополнительно можно посмотреть реального победителя, если лот исторический:
+            real_winners = df_participants[
+                (df_participants['pn_lot'] == test_pn_lot) &
+                (df_participants['is_winner'] == 1)
+            ]['post_num'].unique()
+            print("\nРеальные победители (история):", real_winners)
+
+    def show_procurement_info(pn_lot_id,
+                              df_purchases,
+                              df_participants,
+                              df_items,
+                              df_items_agg=None):
+        """
+        Показывает детальную информацию об одной закупке (pn_lot):
+        - Основные поля из df_purchases (название, цена, регион и т. д.)
+        - Список участников, победителей
+        - Детализированные товары (из df_items)
+        - (Опционально) агрегированные поля (df_items_agg)
+        """
+
+        print(f"\n=== Информация по закупке pn_lot={pn_lot_id} ===")
+
+        # 1) Ищем строку в df_purchases
+        purchase_data = df_purchases[df_purchases['pn_lot'] == pn_lot_id]
+        if purchase_data.empty:
+            print(f"ВНИМАНИЕ: нет данных в df_purchases для {pn_lot_id}")
+        else:
+            print("\n--- Основные поля из df_purchases ---")
+            print(purchase_data.to_string(index=False))  # Вывод данных в консоль
+
+        # 2) Участники в df_participants
+        part_data = df_participants[df_participants['pn_lot'] == pn_lot_id]
+        if part_data.empty:
+            print(f"\nНет участников для {pn_lot_id}")
+        else:
+            print("\n--- Участники из df_participants ---")
+            print(part_data.to_string(index=False))
+
+        # 3) Детализированные товары (df_items)
+        items_data = df_items[df_items['pn_lot'] == pn_lot_id]
+        if items_data.empty:
+            print(f"\nНет детальных товаров (df_items) для {pn_lot_id}")
+        else:
+            print("\n--- Детализированные товары (df_items) ---")
+            print(items_data.to_string(index=False))
+
+        # 4) Опционально: агрегированный список okpd2 (если был df_items_agg)
+        if df_items_agg is not None:
+            items_agg_data = df_items_agg[df_items_agg['pn_lot'] == pn_lot_id]
+            if not items_agg_data.empty:
+                print("\n--- Агрегированный список окпд2 (df_items_agg) ---")
+                print(items_agg_data.to_string(index=False))
+            else:
+                print("\nНет данных в df_items_agg для", pn_lot_id)
+
+    # 8. Обработка «слишком большого» списка (500+ кандидатов)
+    def create_supplier_item_profile(df_items_extended):
+        """
+        Создаёт профиль поставщика по детальным товарам.
+        
+        df_items_extended: DataFrame с детализированной информацией о товарах и поставщиках.
+        """
+        supplier_item_profile = {}
+
+        for row in df_items_extended.itertuples():
+            key = (row.post_num, row.okpd2_code)  # или row.item_name
+            if key not in supplier_item_profile:
+                supplier_item_profile[key] = 0
+            # допустим, увеличиваем на 1, если поставщик выиграл
+            supplier_item_profile[key] += row.is_winner
+
+        return supplier_item_profile
+
+    def refine_ranking_with_detailed_items(ranked_suppliers, df_items, supplier_item_profile):
+        """
+        Уточняем ранжирование поставщиков на основе детальной информации о товарах.
+        
+        ranked_suppliers: DataFrame, где каждая строка = (pn_lot, post_num, score, ...)
+        df_items: таблица с детализацией товаров. Столбцы: [pn_lot, item_name, okpd2_code ...]
+        supplier_item_profile: словарь, где ключ = (post_num, okpd2_code), значение = кол-во побед/участий
+        """
+        scores_refined = []
+
+        for idx, row in ranked_suppliers.iterrows():
+            pn_lot_id = row['pn_lot']
+            post_num = row['post_num']
+
+            # Берём все позиции этого лота
+            lot_positions = df_items[df_items['pn_lot'] == pn_lot_id]
+
+            # Считаем общий "вес" совпадения
+            overlap_sum = 0
+            for iidx, item_row in lot_positions.iterrows():
+                code = item_row['okpd2_code']
+                # Можно учесть item_name, если нужно
+                if (post_num, code) in supplier_item_profile:
+                    overlap_sum += supplier_item_profile[(post_num, code)]
+
+            # Прибавим к старому score кое-какой балл
+            # Чем больше overlap_sum, тем более "глубоко" поставщик подходит
+            new_score = row['score'] + overlap_sum * 0.5  # Коэффициент настраивается
+            scores_refined.append(new_score)
+
+        ranked_suppliers['score_refined'] = scores_refined
+        # Сортируем по новому скору
+        result = ranked_suppliers.sort_values(by='score_refined', ascending=False)
+        return result
+
+    def get_top_10_suppliers(ranked_suppliers, df_items, supplier_item_profile):
+        """
+        Возвращает топ-10 поставщиков с учётом уточнённого ранжирования.
+        
+        ranked_suppliers: DataFrame с ранжированными поставщиками.
+        df_items: таблица с детализацией товаров.
+        supplier_item_profile: профиль поставщика по детальным товарам.
+        """
+        if len(ranked_suppliers) > 500:
+            # Берём топ-500 по score
+            subset_500 = ranked_suppliers.head(500)
+            # Вызываем "refine_ranking_with_detailed_items"
+            refined_500 = refine_ranking_with_detailed_items(subset_500, df_items, supplier_item_profile)
+            # Берём top-10 из уточнённого списка
+            top_10 = refined_500.head(10)
+        else:
+            # если у нас и так мало поставщиков, просто берем top-10
+            top_10 = ranked_suppliers.head(10)
+
+        return top_10
+
+    # 9. Обработка случая «поставщиков=0» (или «лотов=0»)
+    def filter_candidates_with_multilevel_fallback(lot_profile, supplier_info, region_pivot, okpd2_pivot):
+        """
+        Многоуровневый fallback: постепенно ослабляем критерии, если результат пуст.
+        """
+        # 1) Строгая фильтрация
+        filtered_suppliers = filter_candidates(lot_profile, supplier_info, region_pivot, okpd2_pivot,
+                                              region_strict=True, price_margin=0.2, consider_okpd2=True)
+        if not filtered_suppliers.empty:
+            return filtered_suppliers
+
+        # 2) Ослабляем регион
+        print("=== Fallback 1: ослабляем регион ===")
+        filtered_suppliers = filter_candidates(lot_profile, supplier_info, region_pivot, okpd2_pivot,
+                                              region_strict=False, price_margin=0.2, consider_okpd2=True)
+        if not filtered_suppliers.empty:
+            return filtered_suppliers
+
+        # 3) Ослабляем ценовой диапазон
+        print("=== Fallback 2: ослабляем ценовой диапазон ===")
+        filtered_suppliers = filter_candidates(lot_profile, supplier_info, region_pivot, okpd2_pivot,
+                                              region_strict=False, price_margin=0.5, consider_okpd2=True)
+        if not filtered_suppliers.empty:
+            return filtered_suppliers
+
+        # 4) Убираем фильтр по ОКПД2
+        print("=== Fallback 3: убираем фильтр по ОКПД2 ===")
+        filtered_suppliers = filter_candidates(lot_profile, supplier_info, region_pivot, okpd2_pivot,
+                                              region_strict=False, price_margin=0.5, consider_okpd2=False)
+        if not filtered_suppliers.empty:
+            return filtered_suppliers
+
+        print("Даже после всех fallback-критериев нет поставщиков.")
+        return filtered_suppliers
+
+    # Допустим, у нас есть лот (из df_merged), для которого хотим получить рекомендации:
+    test_pn_lot = '0372200105021000289_'  # пример ID
+
+    print("\n=== Генерируем рекомендации для лота ===", test_pn_lot)
+    lot_profile = get_lot_profile(test_pn_lot, df_merged)
+    if lot_profile is None:
+        print(f"Лот {test_pn_lot} не найден.")
+    else:
+        filtered_suppliers = filter_candidates_with_multilevel_fallback(lot_profile,
+                                                                       supplier_grouped,
+                                                                       region_pivot,
+                                                                       okpd2_pivot)
+        if filtered_suppliers.empty:
+            print("Нет поставщиков даже после всех fallback-критериев!")
+        else:
+            ranked_suppliers = rank_suppliers_for_lot(lot_profile,
+                                                      filtered_suppliers,
+                                                      region_pivot,
+                                                      okpd2_pivot)
+            top_10 = ranked_suppliers.head(10)
+            print(top_10)
+
+if __name__ == "__main__":
+    main()
